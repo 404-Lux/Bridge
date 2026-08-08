@@ -19,27 +19,92 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen || true
 
-      - name: Generate Xcode Project via XcodeGen
+      - name: XcodeGen 2.45.4 Format Diagnostic Matrix
         run: |
           cd ios
           export DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer
 
-          echo "Developer directory:"
+          echo "=== XcodeGen & Xcode Info ==="
           xcode-select -p
-
-          echo "Xcode version:"
           xcodebuild -version
-
-          echo "XcodeGen version:"
           xcodegen --version
 
-          echo "Generating project..."
+          echo "=== TEST A: objectVersion: 56 in options ==="
+          cat << 'EOF' > test_a.yml
+          name: TestA
+          options:
+            bundleIdPrefix: com.test
+            deploymentTarget:
+              iOS: 16.0
+            objectVersion: 56
+          targets:
+            TestA:
+              type: application
+              platform: iOS
+              sources:
+                - path: BridgeCompanion
+          EOF
+          xcodegen generate --spec test_a.yml
+          echo "Test A objectVersion:"
+          grep "objectVersion" TestA.xcodeproj/project.pbxproj | head -1
+          rm -rf TestA.xcodeproj test_a.yml
+
+          echo "=== TEST B: objectVersion: 56 + minimumXcodeVersion: 15.0 ==="
+          cat << 'EOF' > test_b.yml
+          name: TestB
+          options:
+            bundleIdPrefix: com.test
+            deploymentTarget:
+              iOS: 16.0
+            objectVersion: 56
+            minimumXcodeVersion: "15.0"
+          targets:
+            TestB:
+              type: application
+              platform: iOS
+              sources:
+                - path: BridgeCompanion
+          EOF
+          xcodegen generate --spec test_b.yml
+          echo "Test B objectVersion:"
+          grep "objectVersion" TestB.xcodeproj/project.pbxproj | head -1
+          rm -rf TestB.xcodeproj test_b.yml
+
+          echo "=== TEST C: objectVersion transformation & Xcode 15.4 reading test ==="
+          cat << 'EOF' > test_c.yml
+          name: TestC
+          options:
+            bundleIdPrefix: com.test
+            deploymentTarget:
+              iOS: 16.0
+          targets:
+            TestC:
+              type: application
+              platform: iOS
+              sources:
+                - path: BridgeCompanion
+          EOF
+          xcodegen generate --spec test_c.yml
+          echo "Test C original objectVersion:"
+          grep "objectVersion" TestC.xcodeproj/project.pbxproj | head -1
+
+          echo "Transforming TestC project file to objectVersion = 56..."
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' TestC.xcodeproj/project.pbxproj
+          echo "Test C transformed objectVersion:"
+          grep "objectVersion" TestC.xcodeproj/project.pbxproj | head -1
+
+          echo "Testing if Xcode 15.4 xcodebuild can read transformed project TestC:"
+          xcodebuild -list -project TestC.xcodeproj
+          rm -rf TestC.xcodeproj test_c.yml
+
+      - name: Generate Xcode Project via XcodeGen
+        run: |
+          cd ios
+          export DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer
           xcodegen generate
 
           echo "Checking generated project format..."
           grep "objectVersion" BridgeCompanion.xcodeproj/project.pbxproj | head -1
-
-          echo "Verifying project format..."
 
           if grep -q "objectVersion = 56;" BridgeCompanion.xcodeproj/project.pbxproj; then
             echo "SUCCESS: Xcode 15-compatible objectVersion 56 generated."
