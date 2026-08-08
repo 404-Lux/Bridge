@@ -30,20 +30,19 @@ jobs:
           xcodebuild build \
             -project BridgeCompanion.xcodeproj \
             -scheme BridgeCompanion \
-            -sdk iphoneos \
+            -sdk iphonesimulator \
             -configuration Release \
+            -destination 'generic/platform=iOS Simulator' \
+            ARCHS="arm64" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            DEVELOPMENT_TEAM="" \
             -derivedDataPath ./build
 
       - name: Package .ipa Binary
         run: |
           cd ios
           mkdir -p Payload
-          cp -r ./build/Build/Products/Release-iphoneos/BridgeCompanion.app ./Payload/
+          cp -r ./build/Build/Products/Release-iphonesimulator/BridgeCompanion.app ./Payload/
           zip -r BridgeCompanion.ipa Payload
           rm -rf Payload
 
