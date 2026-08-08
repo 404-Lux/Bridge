@@ -22,7 +22,32 @@ jobs:
       - name: Generate Xcode Project via XcodeGen
         run: |
           cd ios
+          export DEVELOPER_DIR=/Applications/Xcode_15.4.app/Contents/Developer
+
+          echo "Developer directory:"
+          xcode-select -p
+
+          echo "Xcode version:"
+          xcodebuild -version
+
+          echo "XcodeGen version:"
+          xcodegen --version
+
+          echo "Generating project..."
           xcodegen generate
+
+          echo "Checking generated project format..."
+          grep "objectVersion" BridgeCompanion.xcodeproj/project.pbxproj | head -1
+
+          echo "Verifying project format..."
+
+          if grep -q "objectVersion = 56;" BridgeCompanion.xcodeproj/project.pbxproj; then
+            echo "SUCCESS: Xcode 15-compatible objectVersion 56 generated."
+          else
+            echo "ERROR: Generated project is NOT objectVersion 56."
+            grep "objectVersion" BridgeCompanion.xcodeproj/project.pbxproj | head -1
+            exit 1
+          fi
 
       - name: Archive Unsigned Physical Device Xcode Project (iphoneos)
         run: |
