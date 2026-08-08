@@ -5,26 +5,6 @@ import CryptoKit
 import UIKit
 import UserNotifications
 
-public enum ConnectionState: String {
-    case disconnected
-    case networkUnavailable
-    case discovering
-    case connecting
-    case authenticating
-    case connected
-    case reconnecting
-}
-
-public struct DiagnosticLog: Identifiable {
-    public let id = UUID()
-    public let timestamp: String
-    public let deviceID: String
-    public let stateTransition: String
-    public let reason: String
-    public let attempt: Int
-    public let delay: String
-}
-
 public class NetworkManager: ObservableObject {
     public static let shared = NetworkManager()
 
