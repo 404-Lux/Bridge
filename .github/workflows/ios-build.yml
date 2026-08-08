@@ -30,11 +30,13 @@ jobs:
           xcodebuild build \
             -project BridgeCompanion.xcodeproj \
             -scheme BridgeCompanion \
-            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
             -configuration Release \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM="" \
             -derivedDataPath ./build
 
       - name: Package .ipa Binary
