@@ -5,6 +5,26 @@ import CryptoKit
 import UIKit
 import UserNotifications
 
+public enum ConnectionState: String {
+    case disconnected
+    case networkUnavailable
+    case discovering
+    case connecting
+    case authenticating
+    case connected
+    case reconnecting
+}
+
+public struct DiagnosticLog: Identifiable {
+    public let id = UUID()
+    public let timestamp: String
+    public let deviceID: String
+    public let stateTransition: String
+    public let reason: String
+    public let attempt: Int
+    public let delay: String
+}
+
 public class NetworkManager: ObservableObject {
     public static let shared = NetworkManager()
 
@@ -38,48 +58,41 @@ public class NetworkManager: ObservableObject {
             DispatchQueue.main.async {
                 if path.status == .satisfied {
                     if self?.state == .networkUnavailable {
-                        self?.logPrivacySafeEvent(action: "NETWORK_RESTORED", detail: "wifi_available")
                         self?.state = .disconnected
-                        self?.triggerReconnection()
                     }
                 } else {
-                    self?.logPrivacySafeEvent(action: "NETWORK_LOST", detail: "interface_down")
                     self?.state = .networkUnavailable
-                    self?.connection?.cancel()
                 }
             }
         }
-        let queue = DispatchQueue(label: "BridgePathQueue")
-        pathMonitor?.start(queue: queue)
+        pathMonitor?.start(queue: DispatchQueue.global(qos: .utility))
     }
 
     public func startDiscovery() {
         guard state != .connected && state != .authenticating else { return }
 
         state = .discovering
-        logPrivacySafeEvent(action: "DISCOVERY_START", detail: "_bridge._tcp.local")
-
-        let descriptor = NWBrowser.Descriptor.bonjour(type: "_bridge._tcp", domain: "local.")
         let parameters = NWParameters.tcp
+        browser = NWBrowser(for: .bonjour(type: "_bridge._tcp", domain: "local."), using: parameters)
 
-        browser = NWBrowser(for: descriptor, using: parameters)
         browser?.browseResultsChangedHandler = { [weak self] results, _ in
-            if let firstResult = results.first {
-                DispatchQueue.main.async {
-                    self?.connect(to: firstResult.endpoint)
-                }
+            if let result = results.first {
+                self?.connect(to: result.endpoint)
             }
         }
 
-        browser?.start(queue: .main)
+        browser?.start(queue: DispatchQueue.global(qos: .utility))
     }
 
     public func connect(to endpoint: NWEndpoint) {
-        self.lastEndpoint = endpoint
+        lastEndpoint = endpoint
         state = isReconnecting ? .reconnecting : .connecting
-        logPrivacySafeEvent(action: "CONNECT_INIT", detail: "tcp_socket")
 
-        let parameters = NWParameters.tcp
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.enableKeepalive = true
+        tcpOptions.keepaliveIdle = 5
+
+        let parameters = NWParameters(tls: nil, tcp: tcpOptions)
         connection = NWConnection(to: endpoint, using: parameters)
 
         connection?.stateUpdateHandler = { [weak self] newState in
@@ -87,156 +100,143 @@ public class NetworkManager: ObservableObject {
                 switch newState {
                 case .ready:
                     self?.state = .authenticating
-                    self?.performSessionHandshake()
+                    self?.performECDHHandshake()
                 case .failed(let error):
                     self?.handleFailure(reason: error.localizedDescription)
                 case .cancelled:
-                    self?.handleFailure(reason: "cancelled")
+                    self?.state = .disconnected
                 default:
                     break
                 }
             }
         }
 
-        connection?.start(queue: .main)
+        connection?.start(queue: DispatchQueue.global(qos: .utility))
     }
 
-    private func performSessionHandshake() {
-        let ephemKey = Curve25519.KeyAgreement.PrivateKey()
-        self.ephemeralPrivateKey = ephemKey
+    private func performECDHHandshake() {
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        guard let pubKeyData = ephemeralPrivateKey?.publicKey.rawRepresentation else { return }
 
-        let handshakePayload: [String: Any] = [
-            "type": "handshake_v2",
-            "senderID": CryptoHelper.shared.deviceID,
-            "senderIdentityPK": CryptoHelper.shared.persistentIdentityPublicKeyBase64,
-            "senderEphemeralPK": ephemKey.publicKey.rawRepresentation.base64EncodedString()
-        ]
+        var packet = Data([0x01]) // Handshake Init
+        packet.append(pubKeyData)
 
-        if let jsonData = try? JSONSerialization.data(withJSONObject: handshakePayload) {
-            sendRawFrame(jsonData)
-        }
-
-        startReceivingFrames()
+        sendData(packet)
+        receiveHandshakeResponse()
     }
 
-    /// Transmits text payload safely over encrypted session
-    public func sendClipboardPayload(text: String) {
-        guard state == .connected else { return }
-
-        let payloadSize = text.utf8.count
-        let payload: [String: Any] = [
-            "type": "clipboard",
-            "contentType": "text/plain",
-            "content": text,
-            "timestamp": Date().timeIntervalSince1970
-        ]
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
-              let encryptedData = CryptoHelper.shared.encryptFrame(data: jsonData) else { return }
-
-        sendRawFrame(encryptedData)
-
-        DispatchQueue.main.async {
-            self.lastSentClipboard = text
-            self.logPrivacySafeEvent(action: "CLIPBOARD_SENT", detail: "size=\(payloadSize)B | type=text/plain")
-        }
-    }
-
-    private func sendRawFrame(_ data: Data) {
-        var length = UInt32(data.count).bigEndian
-        var frame = Data(bytes: &length, count: 4)
-        frame.append(data)
-
-        connection?.send(content: frame, completion: .contentProcessed({ _ in }))
-    }
-
-    private func startReceivingFrames() {
-        connection?.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] lengthData, _, isComplete, error in
-            guard let lengthData = lengthData, lengthData.count == 4 else {
-                if isComplete || error != nil { self?.handleFailure(reason: "socket_closed") }
+    private func receiveHandshakeResponse() {
+        connection?.receive(minimumIncompleteLength: 33, maximumLength: 33) { [weak self] data, _, isComplete, error in
+            guard let self = self, let data = data, data.count == 33, data[0] == 0x02 else {
+                self?.handleFailure(reason: "Handshake failed")
                 return
             }
 
-            let payloadLength = lengthData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            self?.connection?.receive(minimumIncompleteLength: Int(payloadLength), maximumLength: Int(payloadLength)) { payloadData, _, _, _ in
-                if let payloadData = payloadData {
-                    self?.handleIncomingPayload(payloadData)
-                }
-                self?.startReceivingFrames()
-            }
-        }
-    }
-
-    private func handleIncomingPayload(_ data: Data) {
-        var processedData = data
-        if state == .connected {
-            guard let decrypted = CryptoHelper.shared.decryptFrame(combinedData: data) else {
-                handleFailure(reason: "decryption_failed")
-                return
-            }
-            processedData = decrypted
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: processedData) as? [String: Any],
-              let type = json["type"] as? String else { return }
-
-        DispatchQueue.main.async {
-            switch type {
-            case "handshake_v2_ack":
-                if let hostID = json["senderID"] as? String,
-                   let hostIdentPK = json["senderIdentityPK"] as? String,
-                   let hostEphemPK = json["senderEphemeralPK"] as? String,
-                   let ephemKey = self.ephemeralPrivateKey {
-
-                    _ = CryptoHelper.shared.establishSession(
-                        ephemeralPrivateKey: ephemKey,
-                        remoteEphemeralPublicKeyBase64: hostEphemPK,
-                        remoteIdentityPublicKeyBase64: hostIdentPK
+            let serverPubKeyData = data.subdata(in: 1..<33)
+            do {
+                let serverPubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPubKeyData)
+                if let ephemeralPrivateKey = self.ephemeralPrivateKey {
+                    let sharedSecret = try ephemeralPrivateKey.sharedSecretFromKeyAgreement(with: serverPubKey)
+                    let symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(
+                        using: SHA256.self,
+                        salt: "BridgeHandshakeSalt".data(using: .utf8)!,
+                        sharedInfo: Data(),
+                        outputByteCount: 32
                     )
-
-                    self.connectedDeviceName = hostID
-                    self.state = .connected
-                    self.reconnectAttempt = 0
-                    self.isReconnecting = false
-                    self.logPrivacySafeEvent(action: "SESSION_ESTABLISHED", detail: "device=\(hostID)")
-                }
-
-            case "clipboard":
-                if let content = json["content"] as? String {
-                    let size = content.utf8.count
-                    self.lastReceivedClipboard = content
-                    self.logPrivacySafeEvent(action: "CLIPBOARD_RECEIVED", detail: "size=\(size)B | type=text/plain")
-
-                    if UIApplication.shared.applicationState == .active {
-                        UIPasteboard.general.string = content
-                    } else {
-                        self.triggerLocalNotification(contentPreview: content)
+                    CryptoHelper.shared.setSymmetricKey(symmetricKey)
+                    DispatchQueue.main.async {
+                        self.state = .connected
+                        self.reconnectAttempt = 0
+                        self.isReconnecting = false
+                        self.logPrivacySafeEvent(action: "CONNECTED", detail: "Session established")
+                        self.startListening()
                     }
                 }
-            default:
-                break
+            } catch {
+                self.handleFailure(reason: "Crypto Error: \(error.localizedDescription)")
             }
         }
     }
 
-    private func triggerLocalNotification(contentPreview: String) {
+    private func startListening() {
+        connection?.receive(minimumIncompleteLength: 4, maximumLength: 10 * 1024 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self = self, let data = data, error == nil else {
+                self?.handleFailure(reason: "Connection lost")
+                return
+            }
+
+            self.handleIncomingPacket(data)
+            if self.state == .connected {
+                self.startListening()
+            }
+        }
+    }
+
+    private func handleIncomingPacket(_ data: Data) {
+        guard data.count > 1 else { return }
+        let packetType = data[0]
+        let payload = data.subdata(in: 1..<data.count)
+
+        switch packetType {
+        case 0x03: // Clipboard Payload
+            if let decrypted = CryptoHelper.shared.decrypt(payload),
+               let text = String(data: decrypted, encoding: .utf8) {
+                DispatchQueue.main.async {
+                    self.lastReceivedClipboard = text
+                    UIPasteboard.general.string = text
+                    self.sendLocalNotification(title: "Clipboard Synced", body: text)
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    public func sendClipboard(_ text: String) {
+        guard state == .connected else { return }
+        guard let textData = text.data(using: .utf8),
+              let encrypted = CryptoHelper.shared.encrypt(textData) else { return }
+
+        var packet = Data([0x03])
+        packet.append(encrypted)
+        sendData(packet)
+        lastSentClipboard = text
+    }
+
+    public func sendPhotoData(_ imageData: Data) {
+        guard state == .connected else { return }
+        guard let encrypted = CryptoHelper.shared.encrypt(imageData) else { return }
+
+        var packet = Data([0x04]) // Photo Payload
+        packet.append(encrypted)
+        sendData(packet)
+    }
+
+    private func sendData(_ data: Data) {
+        connection?.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let error = error {
+                self?.handleFailure(reason: "Send Error: \(error.localizedDescription)")
+            }
+        })
+    }
+
+    private func sendLocalNotification(title: String, body: String) {
         let content = UNMutableNotificationContent()
-        content.title = "Copied from Windows PC"
-        content.body = contentPreview.count > 40 ? String(contentPreview.prefix(40)) + "..." : contentPreview
+        content.title = title
+        content.body = body
         content.sound = .default
 
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     private func triggerReconnection() {
-        guard lastEndpoint != nil && !isReconnecting else { return }
+        guard !isReconnecting else { return }
         isReconnecting = true
         reconnectAttempt += 1
 
-        let delay = min(15.0, 1.0 * pow(1.5, Double(reconnectAttempt - 1)))
-        state = .reconnecting
-        logPrivacySafeEvent(action: "RECONNECT_RETRY", detail: "attempt=\(reconnectAttempt) | delay=\(delay)s")
+        let delay = min(pow(2.0, Double(reconnectAttempt)), 30.0)
+        logPrivacySafeEvent(action: "RECONNECTING", detail: "Attempt \(reconnectAttempt) in \(Int(delay))s")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             if let endpoint = self?.lastEndpoint {
