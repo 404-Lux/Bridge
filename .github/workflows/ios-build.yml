@@ -1,0 +1,55 @@
+name: Bridge iOS ₱0 Build Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    name: Build iOS IPA (Free Tier)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode Version
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project via XcodeGen
+        run: |
+          cd ios
+          xcodegen generate
+
+      - name: Build Unsigned Xcode Project
+        run: |
+          cd ios
+          xcodebuild build \
+            -project BridgeCompanion.xcodeproj \
+            -scheme BridgeCompanion \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath ./build
+
+      - name: Package .ipa Binary
+        run: |
+          cd ios
+          mkdir -p Payload
+          cp -r ./build/Build/Products/Release-iphoneos/BridgeCompanion.app ./Payload/
+          zip -r BridgeCompanion.ipa Payload
+          rm -rf Payload
+
+      - name: Upload .ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BridgeCompanion-unsigned-ipa
+          path: ios/BridgeCompanion.ipa

@@ -1,0 +1,35 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Rust / Cargo
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Tauri
+desktop/src-tauri/target/
+
+# iOS / Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+*.xcworkspace/*
+!*.xcworkspace/contents.xcworkspacedata
+build/
+DerivedData/
+*.ipa
+Payload/
+
+# Environment & IDE
+.env
+.env.local
+.vscode/
+.idea/
