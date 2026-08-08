@@ -183,6 +183,11 @@ public class NetworkManager: ObservableObject {
         lastSentClipboard = text
     }
 
+    public func sendClipboardPayload(text: String) {
+        sendClipboard(text)
+    }
+
+
     public func sendPhotoData(_ imageData: Data) {
         guard state == .connected else { return }
         guard let encrypted = CryptoHelper.shared.encrypt(imageData) else { return }

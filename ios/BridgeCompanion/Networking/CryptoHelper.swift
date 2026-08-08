@@ -143,4 +143,19 @@ public class CryptoHelper {
         receiveSequenceCounter += 1
         return decryptedData
     }
+
+    public func setSymmetricKey(_ key: SymmetricKey) {
+        self.currentSessionKey = key
+        self.sendSequenceCounter = 0
+        self.receiveSequenceCounter = 0
+    }
+
+    public func encrypt(_ data: Data) -> Data? {
+        return encryptFrame(data: data)
+    }
+
+    public func decrypt(_ data: Data) -> Data? {
+        return decryptFrame(combinedData: data)
+    }
 }
+
